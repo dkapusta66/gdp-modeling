@@ -55,7 +55,7 @@ def run_model():
     all_factors = [c for c in ["IMP_Serv", "EXP_Serv", "Oil", "Invest"] if c in df.columns]
     ardl = select_significant_ardl(
         df, dependent="Y_GDP", independents=all_factors,
-        max_ar_lag=3, max_distr_lag=3, sig_level=0.10,
+        max_ar_lag=3, max_dl_lag=3, sig_level=0.10,
     )
     diag = run_full_diagnostics(ardl["residuals"], ardl["fittedvalues"])
     return df, stat_results, vif_results, ardl, diag
