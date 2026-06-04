@@ -7,18 +7,13 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import warnings
 from typing import List, Dict, Optional, Tuple
 
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.stats.diagnostic import (
-    acorr_ljungbox,
-)
+from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import chi2
-
-warnings.filterwarnings("ignore")
 
 
 # 1. ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ
@@ -39,11 +34,11 @@ def load_and_prepare_data(filepath: str) -> pd.DataFrame:
     column_mapping = {}
     for col in df.columns:
         cl = col.lower().strip()
-        if "gdp" in cl or "ввп" in cl or ("y" == cl) or ("y_" in cl):
+        if "gdp" in cl or "ввп" in cl:
             column_mapping[col] = "Y_GDP"
-        elif "exp" in cl:
+        elif "exp" in cl or "экспорт" in cl:
             column_mapping[col] = "EXP_Serv"
-        elif "imp" in cl:
+        elif "imp" in cl or "импорт" in cl:
             column_mapping[col] = "IMP_Serv"
         elif "oil" in cl or "нефт" in cl:
             column_mapping[col] = "Oil"
@@ -53,12 +48,6 @@ def load_and_prepare_data(filepath: str) -> pd.DataFrame:
     if column_mapping:
         df = df.rename(columns=column_mapping)
         print(f"Сопоставление колонок: {column_mapping}")
-
-    # Устранение дубликатов имён
-    if df.columns.duplicated().any():
-        dupes = df.columns[df.columns.duplicated()].tolist()
-        print(f"Дубли колонок: {dupes} — оставлены первые вхождения.")
-        df = df.loc[:, ~df.columns.duplicated(keep="first")]
 
     # Обязательные колонки
     if "Y_GDP" not in df.columns:
@@ -164,7 +153,7 @@ def build_lagged_dataset(
     y: pd.Series,
     X_vars: Dict[str, pd.Series],
     ar_lags: List[int],
-    distr_lags: Dict[str, List[int]],
+    dl_lags: Dict[str, List[int]],
 ) -> Tuple[pd.Series, pd.DataFrame]:
 
     data = pd.DataFrame(index=y.index)
@@ -172,7 +161,7 @@ def build_lagged_dataset(
     for lag in ar_lags:
         data[f"y_L{lag}"] = y.shift(lag)
 
-    for var_name, lags in distr_lags.items():
+    for var_name, lags in dl_lags.items():
         x = X_vars[var_name]
         for lag in lags:
             data[f"{var_name}_L{lag}"] = x.shift(lag)
@@ -186,7 +175,7 @@ def build_lagged_dataset(
 def backward_elimination(
     y_clean: pd.Series,
     X_clean: pd.DataFrame,
-    significance_level: float = 0.10,
+    significance_level: float = 0.05,
     drop_const: bool = False,
 ) -> Tuple[object, list]:
     """
@@ -211,9 +200,6 @@ def backward_elimination(
         excluded.append(worst_var)
         current_X = current_X.drop(columns=[worst_var])
 
-        if len(current_X.columns) <= 1:
-            break
-
     model = sm.OLS(y_clean, current_X).fit()
 
     return model, excluded
@@ -224,13 +210,13 @@ def select_significant_ardl(
     dependent: str = "Y_GDP",
     independents: List[str] = None,
     max_ar_lag: int = 3,
-    max_distr_lag: int = 3,
+    max_dl_lag: int = 3,
     sig_level: float = 0.05,
 ) -> dict:
     """
     Строит ARDL-модель, в которой ВСЕ независимые факторы значимы.
 
-    1. Начинаем с полных лагов (max_ar_lag для y, max_distr_lag для каждого X).
+    1. Начинаем с полных лагов (max_ar_lag для y, max_dl_lag для каждого X).
     2. Backward elimination: удаляем наименее значимые лаги по одному.
     3. Проверка: каждый фактор должен остаться хотя бы с ОДНИМ значимым лагом.
        Если фактор полностью исключён — уменьшаем max_lag и пробуем снова.
@@ -249,7 +235,7 @@ def select_significant_ardl(
 
     print(f"\nЗависимая: {dependent}")
     print(f"Независимые: {actual_indeps}")
-    print(f"Макс. лаг AR: {max_ar_lag}, Макс. лаг DL: {max_distr_lag}")
+    print(f"Макс. лаг AR: {max_ar_lag}, Макс. лаг DL: {max_dl_lag}")
     print(f"Уровень значимости: {sig_level}")
 
     # Итеративный подбор 
@@ -259,12 +245,12 @@ def select_significant_ardl(
 
     # Перебираем разные стартовые конфигурации лагов
     for ar_max in range(1, max_ar_lag + 1):
-        for dl_max in range(1, max_distr_lag + 1):
+        for dl_max in range(0, max_dl_lag + 1):
             # Начальные лаги
             ar_lags = list(range(1, ar_max + 1))
-            distr_lags = {v: list(range(0, dl_max + 1)) for v in actual_indeps}
+            dl_lags = {v: list(range(0, dl_max + 1)) for v in actual_indeps}
 
-            y_c, X_c = build_lagged_dataset(y, X_vars, ar_lags, distr_lags)
+            y_c, X_c = build_lagged_dataset(y, X_vars, ar_lags, dl_lags)
 
             if len(y_c) <= len(X_c.columns) + 2:
                 continue  
@@ -285,29 +271,22 @@ def select_significant_ardl(
             all_factors_ok = all(f in factors_present for f in actual_indeps)
 
             # Считаем качество модели:
-            n_excluded = len(excluded)
-            missing_factors = len(actual_indeps) - len(factors_present)
-            score = fitted.aic + missing_factors * 1000 + n_excluded * 2
-
+            score = fitted.aic 
             if score < best_score and len(remaining_vars) >= len(actual_indeps):
                 best_score = score
                 best_model = fitted
                 best_info = {
-                    "ar_lags_used": ar_lags,
-                    "dl_max_used": dl_max,
                     "excluded": excluded,
                     "all_factors_present": all_factors_ok,
                     "factors_present": factors_present,
-                    "missing_factors": missing_factors,
                 }
 
     if best_model is None:
         raise ValueError("Не удалось построить ARDL-модель.")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'.'*60}")
     print(f"ИТОГОВАЯ МОДЕЛЬ ARDL:")
-    print(f"{'='*60}")
-    print(f"  Начальные лаги: AR=1..{best_info['ar_lags_used'][-1]}, DL=0..{best_info['dl_max_used']}")
+    print(f"{'.'*60}")
     print(f"  Исключено лагов: {len(best_info['excluded'])}")
     print(f"  Все факторы сохранены: {best_info['all_factors_present']}")
     if not best_info['all_factors_present']:
@@ -567,8 +546,8 @@ def main():
         dependent="Y_GDP",
         independents=all_factors,
         max_ar_lag=3,
-        max_distr_lag=3,
-        sig_level=0.10,
+        max_dl_lag=3,
+        sig_level=0.05,
     )
 
     # 5. Диагностика ARDL
